@@ -9,13 +9,18 @@
 'use strict';
 
 var leftVideo = document.getElementById('leftVideo');
+var leftVideo2 = document.getElementById('leftVideo2');
 var rightVideo = document.getElementById('rightVideo');
 var currentTimeInput = document.getElementById('currentTime');
 
 var stream;
+var stream2;
+var remoteStreams = [];
 
 var pc1;
 var pc2;
+var pc3;
+var pc4;
 var offerOptions = {
   offerToReceiveAudio: 1,
   offerToReceiveVideo: 1
@@ -23,17 +28,24 @@ var offerOptions = {
 
 var pc1SendChannel;
 var pc2SendChannel;
+var pc3SendChannel;
+var pc4SendChannel;
 
 var startTime;
+var selectedStream = null;
 
 function maybeCreateStream() {
   if (stream) {
     return;
   }
+
   if (leftVideo.captureStream) {
     stream = leftVideo.captureStream();
+    stream2 = leftVideo2.captureStream();
     console.log('Captured stream from leftVideo with captureStream',
       stream);
+    console.log('Captured stream from leftVideo2 with captureStream',
+      stream2);
     call();
   } else if (leftVideo.mozCaptureStream) {
     stream = leftVideo.mozCaptureStream();
@@ -53,7 +65,7 @@ if (leftVideo.readyState >= 3) {  // HAVE_FUTURE_DATA
   maybeCreateStream();
 }
 
-leftVideo.play();
+// leftVideo.play();
 
 rightVideo.onloadedmetadata = function() {
   trace('Remote video videoWidth: ' + this.videoWidth +
@@ -84,6 +96,7 @@ function call() {
     trace('Using audio device: ' + audioTracks[0].label);
   }
   var servers = null;
+
   pc1 = new RTCPeerConnection(servers);
   trace('Created local peer connection object pc1');
 
@@ -127,6 +140,52 @@ function call() {
   trace('pc1 createOffer start');
   pc1.createOffer(onCreateOfferSuccess, onCreateSessionDescriptionError,
     offerOptions);
+
+
+  // second stream
+
+  pc3 = new RTCPeerConnection(servers);
+  trace('Created local peer connection object pc3');
+
+  var dataConstraint = null;
+  pc3SendChannel = pc3.createDataChannel('sendDataChannel2',
+    dataConstraint);
+  trace('Created send data channel for pc3');
+
+  pc3.onicecandidate = function(e) {
+    onIceCandidate(pc3, e);
+  };
+  pc3.ondatachannel = receiveChannelCallback("pc3");
+
+  pc4 = new RTCPeerConnection(servers);
+  trace('Created remote peer connection object pc4');
+  pc4.onicecandidate = function(e) {
+    onIceCandidate(pc4, e);
+  };
+  pc3.oniceconnectionstatechange = function(e) {
+    onIceStateChange(pc3, e);
+  };
+  pc4.oniceconnectionstatechange = function(e) {
+    onIceStateChange(pc4, e);
+  };
+  pc4SendChannel = pc4.createDataChannel('sendDataChannel2',
+    dataConstraint);
+  pc4.ontrack = gotRemoteStream;
+  pc4.ondatachannel = receiveChannelCallback("pc4");
+
+  stream2.getTracks().forEach(
+    function(track) {
+      pc3.addTrack(
+        track,
+        stream2
+      );
+    }
+  );
+  trace('Added local stream to pc3');
+
+  trace('pc3 createOffer start');
+  pc3.createOffer(onCreateOfferSuccess2, onCreateSessionDescriptionError,
+    offerOptions);
 }
 
 function onCreateSessionDescriptionError(error) {
@@ -150,6 +209,24 @@ function onCreateOfferSuccess(desc) {
   pc2.createAnswer(onCreateAnswerSuccess, onCreateSessionDescriptionError);
 }
 
+function onCreateOfferSuccess2(desc) {
+  trace('Offer from pc3\n' + desc.sdp);
+  trace('pc3 setLocalDescription start');
+  pc3.setLocalDescription(desc, function() {
+    onSetLocalSuccess(pc3);
+  }, onSetSessionDescriptionError);
+  trace('pc4 setRemoteDescription start');
+  pc4.setRemoteDescription(desc, function() {
+    onSetRemoteSuccess(pc4);
+  }, onSetSessionDescriptionError);
+  trace('pc4 createAnswer start');
+  // Since the 'remote' side has no media stream we need
+  // to pass in the right constraints in order for it to
+  // accept the incoming offer of audio and video.
+  pc4.createAnswer(onCreateAnswerSuccess2, onCreateSessionDescriptionError);
+}
+
+
 function onSetLocalSuccess(pc) {
   trace(getName(pc) + ' setLocalDescription complete');
 }
@@ -163,10 +240,7 @@ function onSetSessionDescriptionError(error) {
 }
 
 function gotRemoteStream(event) {
-  if (rightVideo.srcObject !== event.streams[0]) {
-    rightVideo.srcObject = event.streams[0];
-    console.log('pc2 received remote stream', event);
-  }
+  remoteStreams.push(event.streams[0]);
 }
 
 function onCreateAnswerSuccess(desc) {
@@ -178,6 +252,18 @@ function onCreateAnswerSuccess(desc) {
   trace('pc1 setRemoteDescription start');
   pc1.setRemoteDescription(desc, function() {
     onSetRemoteSuccess(pc1);
+  }, onSetSessionDescriptionError);
+}
+
+function onCreateAnswerSuccess2(desc) {
+  trace('Answer from pc4:\n' + desc.sdp);
+  trace('pc4 setLocalDescription start');
+  pc4.setLocalDescription(desc, function() {
+    onSetLocalSuccess(pc4);
+  }, onSetSessionDescriptionError);
+  trace('pc3 setRemoteDescription start');
+  pc3.setRemoteDescription(desc, function() {
+    onSetRemoteSuccess(pc3);
   }, onSetSessionDescriptionError);
 }
 
@@ -215,7 +301,11 @@ function getName(pc) {
 }
 
 function getOtherPc(pc) {
-  return (pc === pc1) ? pc2 : pc1;
+  if(pc === pc1 || pc === pc2) {
+    return (pc === pc1) ? pc2 : pc1;
+  }
+  
+  return (pc === pc3) ? pc4 : pc3;
 }
 
 function receiveChannelCallback(channelName) {
@@ -224,8 +314,6 @@ function receiveChannelCallback(channelName) {
     var receiveChannel = event.channel;
 
     receiveChannel.onmessage = function(event) {
-      trace("message recieved: " + event.data + " for: " + channelName)
-
       var cmd = event.data.split(",");
 
       // media player controls
@@ -246,7 +334,31 @@ function receiveChannelCallback(channelName) {
       }
       else if(channelName == "pc2") {
         if(cmd[0] == "time") {
-          currentTimeInput.value = cmd[1];
+          if(selectedStream === 0) {
+            currentTimeInput.value = cmd[1];
+          }
+        }
+      }
+      if(channelName == "pc3") {
+        if(cmd[0] == "seek") {
+          var seconds = parseFloat(cmd[1]);
+          leftVideo2.currentTime = seconds;
+        }
+        else if(cmd[0] == "play") {
+          leftVideo2.play();          
+        }
+        else if(cmd[0] == "pause") {
+          leftVideo2.pause();
+        }
+        else {
+          trace("unknown command:" + event.data);
+        }
+      }
+      else if(channelName == "pc4") {
+        if(cmd[0] == "time") {
+          if(selectedStream === 2) {
+            currentTimeInput.value = cmd[1];
+          }
         }
       }
     };
@@ -264,20 +376,43 @@ function receiveChannelCallback(channelName) {
 }
 
 function seek(seconds) {
-  pc2SendChannel.send("seek," + seconds)
+  if(selectedStream === 0) {
+    pc2SendChannel.send("seek," + seconds)
+  }
+  else {
+    pc4SendChannel.send("seek," + seconds)
+  }
 }
 
 function play() {
-  pc2SendChannel.send("play,");
-  rightVideo.play();
+  if(selectedStream === 0) {
+    pc2SendChannel.send("play,");
+  }
+  else {
+    pc4SendChannel.send("play,");
+  }
 }
 
 function pause() {
-  pc2SendChannel.send("pause,")
+  if(selectedStream === 0) {
+    pc2SendChannel.send("pause,");
+  }
+  else {
+    pc4SendChannel.send("pause,");
+  }
 }
 
 setInterval(function() {
   if(pc1SendChannel) {
     pc1SendChannel.send("time," + leftVideo.currentTime)
   }
+  
+  if(pc3SendChannel) {
+    pc3SendChannel.send("time," + leftVideo2.currentTime)
+  }
 }, 500)
+
+function setStream(idx) {
+  rightVideo.srcObject = remoteStreams[idx];
+  selectedStream = idx;
+}
