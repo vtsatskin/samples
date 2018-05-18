@@ -10,6 +10,7 @@
 
 var leftVideo = document.getElementById('leftVideo');
 var rightVideo = document.getElementById('rightVideo');
+var currentTimeInput = document.getElementById('currentTime');
 
 var stream;
 
@@ -19,6 +20,9 @@ var offerOptions = {
   offerToReceiveAudio: 1,
   offerToReceiveVideo: 1
 };
+
+var pc1SendChannel;
+var pc2SendChannel;
 
 var startTime;
 
@@ -82,9 +86,18 @@ function call() {
   var servers = null;
   pc1 = new RTCPeerConnection(servers);
   trace('Created local peer connection object pc1');
+
+  var dataConstraint = null;
+  pc1SendChannel = pc1.createDataChannel('sendDataChannel',
+    dataConstraint);
+  trace('Created send data channel for pc1');
+
   pc1.onicecandidate = function(e) {
     onIceCandidate(pc1, e);
   };
+  pc1.ondatachannel = receiveChannelCallback("pc1");
+
+
   pc2 = new RTCPeerConnection(servers);
   trace('Created remote peer connection object pc2');
   pc2.onicecandidate = function(e) {
@@ -96,7 +109,10 @@ function call() {
   pc2.oniceconnectionstatechange = function(e) {
     onIceStateChange(pc2, e);
   };
+  pc2SendChannel = pc2.createDataChannel('sendDataChannel',
+    dataConstraint);
   pc2.ontrack = gotRemoteStream;
+  pc2.ondatachannel = receiveChannelCallback("pc2");
 
   stream.getTracks().forEach(
     function(track) {
@@ -201,3 +217,67 @@ function getName(pc) {
 function getOtherPc(pc) {
   return (pc === pc1) ? pc2 : pc1;
 }
+
+function receiveChannelCallback(channelName) {
+  return function(event) {
+    trace('Receive Channel Callback');
+    var receiveChannel = event.channel;
+
+    receiveChannel.onmessage = function(event) {
+      trace("message recieved: " + event.data + " for: " + channelName)
+
+      var cmd = event.data.split(",");
+
+      // media player controls
+      if(channelName == "pc1") {
+        if(cmd[0] == "seek") {
+          var seconds = parseFloat(cmd[1]);
+          leftVideo.currentTime = seconds;
+        }
+        else if(cmd[0] == "play") {
+          leftVideo.play();          
+        }
+        else if(cmd[0] == "pause") {
+          leftVideo.pause();
+        }
+        else {
+          trace("unknown command:" + event.data);
+        }
+      }
+      else if(channelName == "pc2") {
+        if(cmd[0] == "time") {
+          currentTimeInput.value = cmd[1];
+        }
+      }
+    };
+    receiveChannel.onopen = function() {
+      trace("channel open: " + channelName)
+
+      if(channelName == "pc2" && !pc2SendChannel) {
+        pc2SendChannel = receiveChannel;
+      }
+    };
+    receiveChannel.onclose = function() {
+      trace("channel closed: " + channelName)
+    };
+  }
+}
+
+function seek(seconds) {
+  pc2SendChannel.send("seek," + seconds)
+}
+
+function play() {
+  pc2SendChannel.send("play,");
+  rightVideo.play();
+}
+
+function pause() {
+  pc2SendChannel.send("pause,")
+}
+
+setInterval(function() {
+  if(pc1SendChannel) {
+    pc1SendChannel.send("time," + leftVideo.currentTime)
+  }
+}, 500)
